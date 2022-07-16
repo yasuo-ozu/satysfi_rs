@@ -1,0 +1,3 @@
+[submodule "contrib/satysfi"]
+	path = contrib/satysfi
+	url = https://github.com/gfngfn/SATySFi.git

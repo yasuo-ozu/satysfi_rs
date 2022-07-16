@@ -1,0 +1,14 @@
+[package]
+name = "satysfi_rs"
+version = "0.1.0"
+authors = ["Yasuo Ozu <yasuo@ozu.email>"]
+license = "MIT"
+edition = "2018"
+description = "SATySFi implementation and binding for Rust"
+readme = "README.md"
+repository = "https://github.com/yasuo-ozu/satysfi_rs"
+categories = ["template-engine", "text-processing", "graphics"]
+keywords = ["satysfi", "latex", "typesetting", "pdf", "binding"]
+
+[dependencies]
+ocaml-interop = "0.8.8"

@@ -1,5 +1,5 @@
 [package]
-name = "satysfi"
+name = "satysfi-bundler"
 version = "0.1.0"
 authors = ["Yasuo Ozu <yasuo@ozu.email>"]
 license = "MIT"
@@ -11,5 +11,3 @@ categories = ["template-engine", "text-processing", "graphics"]
 keywords = ["satysfi", "latex", "typesetting", "pdf", "binding"]
 
 [dependencies]
-ocaml-interop = "0.8.8"
-satysfi-bundler = { path = "bundler" }

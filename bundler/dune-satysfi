@@ -1,0 +1,13 @@
+(executable
+ (modes (native exe) (native object) (native shared_object))
+  (flags (
+:standard
+-cclib -L/usr/lib
+-cclib -L../../lib
+ ))
+ (name satysfi)
+ (public_name satysfi)
+ (libraries main)
+ (preprocess no_preprocessing)
+)
+

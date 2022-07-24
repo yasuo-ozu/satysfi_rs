@@ -11,3 +11,8 @@ categories = ["template-engine", "text-processing", "graphics"]
 keywords = ["satysfi", "latex", "typesetting", "pdf", "binding"]
 
 [dependencies]
+ocaml-interop = "0.8.8"
+ocaml-sys = "0.23.0"
+
+[build-dependencies]
+pkg-config = "0.3.25"

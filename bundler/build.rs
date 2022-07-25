@@ -1,5 +1,6 @@
 extern crate pkg_config;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::{env, process::Command};
 
@@ -15,6 +16,32 @@ fn test(cmdname: &str, chdir: Option<&str>, args: &[&str]) -> Result<bool, Strin
 		.status()
 		.map_err(|_| format!("Cannot run {} {:?}", cmdname, args))?
 		.success())
+}
+
+fn get_output(cmdname: &str, chdir: Option<&str>, args: &[&str]) -> Result<String, String> {
+	eprintln!("[build.rs] Running {} {:?}", cmdname, args);
+	let mut cmd = Command::new(cmdname);
+	let cmd = match chdir {
+		Some(s) => cmd.current_dir(s),
+		None => &mut cmd,
+	};
+	let out = cmd
+		.args(args)
+		.output()
+		.map_err(|_| format!("Cannot run {} {:?}", cmdname, args))?;
+	if out.status.success() {
+		Ok(std::str::from_utf8(out.stdout.as_ref())
+			.unwrap()
+			.trim()
+			.to_owned())
+	} else {
+		Err(format!(
+			"Command error {} {:?}, {}",
+			cmdname,
+			args,
+			std::str::from_utf8(out.stderr.as_ref()).unwrap()
+		))
+	}
 }
 
 fn runcmd(cmdname: &str, chdir: Option<&str>, args: &[&str]) -> Result<(), String> {
@@ -176,6 +203,22 @@ where
 	}
 }
 
+fn write_version_rs(fname: &str, satysfi_ver: &str) -> Result<(), std::io::Error> {
+	let mut fp = std::fs::File::create(fname)?;
+	writeln!(
+		fp,
+		"pub static SATYSFI_VERSION: &'static str = \"{}\";",
+		satysfi_ver,
+	)?;
+	fp.flush()?;
+	Ok(())
+}
+
+fn generate_version_rs(fname: &str, satysfi_dir: &str) -> Result<(), String> {
+	let satysfi_version = get_output("git", Some(satysfi_dir), &["describe"])?;
+	write_version_rs(fname, &satysfi_version).map_err(|e| format!("{:?}", e))
+}
+
 fn run() -> Result<(), String> {
 	let out_dir = env::var("OUT_DIR").unwrap();
 	let out_dir = &out_dir;
@@ -215,6 +258,11 @@ fn run() -> Result<(), String> {
 			],
 		);
 	});
+	eprintln!(
+		"[build.rs] Copying {} to {}",
+		&join(&[project_dir, "dune-satysfi"]),
+		&join(&[satysfi_dir, "bin", "dune"]),
+	);
 	runcmd(
 		"cp",
 		None,
@@ -331,6 +379,8 @@ fn run() -> Result<(), String> {
 			&join(&[out_dir, "libsatysfi.so"]),
 		],
 	)?;
+
+	generate_version_rs(&join(&[out_dir, "version.rs"]), satysfi_dir)?;
 
 	println!("cargo:rerun-if-changed=build.rs");
 	println!(

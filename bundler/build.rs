@@ -7,6 +7,7 @@ use std::{ffi, fs, io};
 
 fn generate_glue(srcdir: &Path, output: &Path) -> Result<(), std::io::Error> {
 	let ignore_mod = [
+		"Alist.empty",
 		"DirectedGraph.",
 		"Display.",
 		"HashTree.",
@@ -66,7 +67,12 @@ fn generate_glue(srcdir: &Path, output: &Path) -> Result<(), std::io::Error> {
 		let mut output = fs::File::create(output)?;
 		writeln!(
 			output,
-			"let main_lib () =\n{}",
+			r#"
+let alist_empty () = Alist.empty
+let main_lib () =
+	Callback.register "Alist.empty" alist_empty ;
+	{}
+			"#,
 			glue.iter()
 				.map(|s| s.as_ref())
 				.collect::<Vec<_>>()

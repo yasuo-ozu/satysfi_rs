@@ -46,8 +46,8 @@ macro_rules! ocaml_closure_reference {
 /// - Input and output types are rust-native
 #[macro_export]
 macro_rules! ocaml_defs {
-	(@default_to {$d:ty}) => { $d };
-	(@default_to {$d:ty} $($t:tt)+) => { $($t)+ };
+	(@default_to {$d:tt}) => { $d };
+	(@default_to {$d:tt} $($t:tt)+) => { $($t)+ };
 	(@emit_call $cl:ident $cr:ident $arg1:ident) => { $cl.call($cr, $arg1) };
 	(@emit_call $cl:ident $cr:ident $arg1:ident $arg2:ident) => { $cl.call2($cr, $arg1, $arg2) };
 	(@emit_call $cl:ident $cr:ident $arg1:ident $arg2:ident $arg3:ident) => { $cl.call3($cr, $arg1, $arg2, $arg3) };
@@ -56,41 +56,33 @@ macro_rules! ocaml_defs {
 	};
 	() => ();
 
-	// fn
-	(
-		$(#[ocaml_name=$ocamlname:expr])?
-		$(#[doc=$doc:expr])*
-		$vis:vis fn $name:ident() $( -> $(#[ocaml_type=$rotyp:ty])? $rtyp:ty)?; $($t:tt)*
+	(@emit_fn
+		{$($ocamlname:expr)?}
+		{$($doc:expr)?} $vis:vis $name:ident {$($($tpar:ident)+)?} {} {}
+		{$($rtyp:ty$(,$rotyp:ty)?)?} $($t:tt)*
 	) => {
-		$(#[doc=$doc])*
-		$vis fn $name<'a>() $(-> $rtyp)? {
-			$crate::ocaml_interop::OCamlRuntime::init_persistent();
-			let val = $crate::ocaml_closure_reference!(@noarg closure, $name $(,$ocamlname)?);
-			let cr = unsafe { $crate::ocaml_interop::OCamlRuntime::recover_handle() };
-			let val = unsafe { $crate::ocaml_interop::OCaml::new(cr, val) };
-			$(val.to_rust::<$rtyp>())?
-		}
-
-		$crate::ocaml_defs!($($t)*);
+		$crate::ocaml_defs!(@emit_fn
+			{$($ocamlname)?} {$($doc)*} $vis $name {$($($tpar)+)?} {} {{(), a ()}} {$($rtyp$(,$rotyp)?)?}
+			$($t)*
+		);
 	};
-	(
-		$(#[ocaml_name=$ocamlname:expr])?
-		$(#[doc=$doc:expr])*
-		$vis:vis fn $name:ident(
-			$(
-				$(#[ocaml_type=$otyp:ty])?
-				$arg:ident: $typ:ty
-			),+ $(,)?
-		) $( -> $(#[ocaml_type=$rotyp:ty])? $rtyp:ty)?; $($t:tt)*
+	(@emit_fn
+		{$($ocamlname:expr)?}
+		{$($doc:expr)?} $vis:vis $name:ident {$($($tpar:ident)+)?} {$({$inarg:ident $intyp:ty})*} {$({$val:expr, $arg:ident $typ:ty $(,$otyp: ty)?})+}
+		{$($rtyp:ty$(,$rotyp:ty)?)?} $($t:tt)*
 	) => {
 		$(#[doc=$doc])*
-		$vis fn $name<'a>(
-			$($arg: $typ),+
-		) $(-> $rtyp)? {
+		$vis fn $name<'a$($(,$tpar: 'static)+)?>(
+			$($inarg: $intyp),*
+		) $(-> $rtyp)?
+		where
+			$($rtyp: $crate::ocaml_interop::FromOCaml<$crate::ocaml_defs!(@default_to {$rtyp} $($rotyp)?)>,)?
+			$($typ: $crate::ocaml_interop::ToOCaml<$crate::ocaml_defs!(@default_to {$typ} $($otyp)?)>,)+
+		{
 			$crate::ocaml_interop::OCamlRuntime::init_persistent();
 			$(
 				let cr = unsafe { $crate::ocaml_interop::OCamlRuntime::recover_handle() };
-				let $arg = <$typ as $crate::ocaml_interop::ToOCaml<$crate::ocaml_defs!(@default_to {$typ} $($otyp)?)>>::to_ocaml(&$arg, cr);
+				let $arg = <$typ as $crate::ocaml_interop::ToOCaml<$crate::ocaml_defs!(@default_to {$typ} $($otyp)?)>>::to_ocaml(&$val, cr);
 				let $arg = $arg.as_ref();
 			)+
 			$crate::ocaml_closure_reference!(closure, $name $(,$ocamlname)?);
@@ -100,8 +92,24 @@ macro_rules! ocaml_defs {
 				= $crate::ocaml_defs!(@emit_call closure cr $($arg)*);
 			$(ret.to_rust::<$rtyp>())?
 		}
-
 		$crate::ocaml_defs!($($t)*);
+	};
+
+	// fn
+	(
+		$(#[ocaml_name=$ocamlname:expr])?
+		$(#[doc=$doc:expr])*
+		$vis:vis fn $name:ident$(<$($tpar:ident),+>)?(
+			$(
+				$(#[ocaml_type=$otyp:ty])?
+				$arg:ident: $typ:ty
+			),* $(,)?
+		) $( -> $(#[ocaml_type=$rotyp:ty])? $rtyp:ty)?; $($t:tt)*
+	) => {
+		$crate::ocaml_defs!(@emit_fn
+			{$($ocamlname)?} {$($doc)*} $vis $name {$($($tpar)+)?} {$({$arg $typ})*}{$({$arg, $arg $typ $(,$otyp)?})*} {$($rtyp$(,$rotyp)?)?}
+			$($t)*
+		);
 	};
 
 	// enum
@@ -215,14 +223,14 @@ macro_rules! ocaml_defs {
 	(
 		$(#[derive($($derive:ident),*)])?
 		$(#[doc=$doc:expr])*
-		$vis:vis type $name:ident; $($t:tt)*
+		$vis:vis type $name:ident $(< $($tpar:ident),+ >)? ; $($t:tt)*
 	) => {
 		$(#[derive($($derive),*)])?
 		$(#[doc = $doc])*
-		$vis struct $name($crate::ocaml_interop::RawOCaml);
-		unsafe impl $crate::ocaml_interop::ToOCaml<$name> for $name {
+		$vis struct $name$(<$($tpar),+>)?($crate::ocaml_interop::RawOCaml$(,::core::marker::PhantomData<($($tpar,)+)>)?);
+		unsafe impl$(<$($tpar),+>)? $crate::ocaml_interop::ToOCaml<Self> for $name$(<$($tpar),+>)? {
 			fn to_ocaml<'a>(&self, cr: &'a mut $crate::ocaml_interop::OCamlRuntime)
-				-> $crate::ocaml_interop::OCaml<'a, $name> {
+				-> $crate::ocaml_interop::OCaml<'a, Self> {
 				unsafe {
 					$crate::ocaml_interop::OCaml::new(
 						cr,
@@ -231,11 +239,11 @@ macro_rules! ocaml_defs {
 				}
 			}
 		}
-		unsafe impl $crate::ocaml_interop::FromOCaml<$name> for $name {
-			fn from_ocaml<'a>(v: $crate::ocaml_interop::OCaml<$name>)
-				-> $name {
+		unsafe impl$(<$($tpar),+>)? $crate::ocaml_interop::FromOCaml<Self> for $name$(<$($tpar),+>)? {
+			fn from_ocaml<'a>(v: $crate::ocaml_interop::OCaml<Self>)
+				-> Self {
 				unsafe {
-					Self(v.raw())
+					Self(v.raw()$(,$crate::ocaml_defs!(@default_to {$($tpar)?} ::core::marker::PhantomData))?)
 				}
 			}
 		}
@@ -280,6 +288,70 @@ pub mod entry {
 		}
 
 		type Apple;
+	}
+}
+
+pub mod alist {
+	use ocaml_interop::OCamlList;
+	ocaml_defs! {
+		#[derive(Copy, Clone)]
+		pub type AList<T>;
+
+		#[ocaml_name = "Alist.empty"]
+		pub fn empty<T>() -> AList<T>;
+		#[ocaml_name = "Alist.extend"]
+		pub fn extend<T>(a: AList<T>, b: T) -> AList<T>;
+		#[ocaml_name = "Alist.append"]
+		pub fn append<T>(
+			a: AList<T>,
+			#[ocaml_type = OCamlList<T>] v: Vec<T>
+		) -> AList<T>;
+		#[ocaml_name = "Alist.to_list"]
+		pub fn to_list<T>(
+			a: AList<T>,
+		) -> #[ocaml_type = OCamlList<T>] Vec<T>;
+		#[ocaml_name = "Alist.to_list_rev"]
+		pub fn to_list_rev<T>(
+			a: AList<T>,
+		) -> #[ocaml_type = OCamlList<T>] Vec<T>;
+		#[ocaml_name = "Alist.of_list"]
+		pub fn of_list<T>(
+			#[ocaml_type = OCamlList<T>] v: Vec<T>
+		) -> AList<T>;
+		#[ocaml_name = "Alist.chop_last"]
+		pub fn chop_last<T>(
+			a: AList<T>,
+		) -> Option<(AList<T>, T)>;
+		#[ocaml_name = "Alist.cat"]
+		pub fn cat<T>(
+			a: AList<T>,
+			b: AList<T>,
+		) -> AList<T>;
+	}
+
+	#[test]
+	fn test() {
+		let a: AList<String> = empty();
+		let a = extend(a, "a".to_owned());
+		let a = extend(a, "b".to_owned());
+		assert_eq!(vec!["a".to_owned(), "b".to_owned()], to_list(a.clone()));
+		assert_eq!(vec!["b".to_owned(), "a".to_owned()], to_list_rev(a.clone()));
+		let b = of_list(vec!["c".to_owned(), "d".to_owned()]);
+		let (c, o) = chop_last(b.clone()).unwrap();
+		assert_eq!(o, "d".to_owned());
+		let (c, o) = chop_last(c).unwrap();
+		assert_eq!(o, "c".to_owned());
+		assert!(chop_last(c).is_none());
+		let d = cat(a, b);
+		assert_eq!(
+			to_list(d),
+			vec![
+				"a".to_owned(),
+				"b".to_owned(),
+				"c".to_owned(),
+				"d".to_owned(),
+			]
+		)
 	}
 }
 
@@ -380,50 +452,3 @@ pub mod version {
 pub mod version {
 	include!(concat!(env!("OUT_DIR"), "/version.rs"));
 }
-
-// #[link(name = "satysfi")]
-// extern "C" {
-// 	pub fn caml_iterate_named_values(
-// 		f: *const extern "C" fn(*const c_void, *const std::os::raw::c_char),
-// 	);
-// }
-
-// pub mod binding {
-// 	pub struct FileDependencyGraph;
-// }
-//
-// #[no_mangle]
-// extern "C" fn print_name(_val: *const c_void, name: *const
-// std::os::raw::c_char) { 	let s = unsafe { std::ffi::CStr::from_ptr(name) };
-// 	println!("> {:?}", s);
-// }
-//
-// fn initialize_ocaml() {
-// 	static INIT: std::sync::Once = std::sync::Once::new();
-//
-// 	INIT.call_once(|| {
-// 		let arg0 = "ocaml\0".as_ptr() as *const ocaml_sys::Char;
-// 		let c_args = vec![arg0, core::ptr::null()];
-// 		unsafe {
-// 			ocaml_sys::caml_startup(c_args.as_ptr());
-// 		}
-// 	})
-// }
-//
-// fn init_closure(name: &str) -> Option<*mut Value> {
-// 	let named = unsafe {
-// 		let s = std::ffi::CString::new(name).unwrap();
-// 		ocaml_sys::caml_named_value(s.as_ptr())
-// 	};
-// 	if named.is_null() || unsafe { ocaml_sys::tag_val(*named) } !=
-// ocaml_sys::CLOSURE { 		None
-// 	} else {
-// 		Some(unsafe { std::mem::transmute::<_, *mut Value>(named) })
-// 	}
-// }
-
-pub fn run_main() {}
-
-// struct OpaqueType(std::ffi::c_void);
-//
-// struct BoxRoot();

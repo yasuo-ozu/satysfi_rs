@@ -1,12 +1,30 @@
+#![feature(log_syntax)]
 #[macro_use]
 pub extern crate ocaml_interop;
 pub extern crate ocaml_sys;
 
 use ocaml_sys::{caml_startup, Value};
 use std::ffi::c_void;
+pub mod closure;
 
 #[macro_export]
 macro_rules! ocaml_closure_reference {
+	(@noarg $var:ident, $name:ident) => {
+		$crate::ocaml_closure_reference!(@noarg $var, $name, stringify!($name));
+	};
+	(@noarg $var:ident, $name:ident, $ocamlname:expr) => {
+		{
+			let name = std::ffi::CString::new($ocamlname).unwrap();
+			let named = unsafe {
+				$crate::ocaml_sys::caml_named_value(name.as_ptr())
+			};
+			if named.is_null() || unsafe { $crate::ocaml_sys::tag_val(*named) } != $crate::ocaml_sys::CLOSURE {
+				panic!("Name {} not valid", $ocamlname);
+			} else {
+				unsafe{ *named }
+			}
+		}
+	};
 	($var:ident, $name:ident) => {
 		$crate::ocaml_closure_reference!($var, $name, stringify!($name));
 	};
@@ -38,6 +56,23 @@ macro_rules! ocaml_defs {
 	};
 	() => ();
 
+	// fn
+	(
+		$(#[ocaml_name=$ocamlname:expr])?
+		$(#[doc=$doc:expr])*
+		$vis:vis fn $name:ident() $( -> $(#[ocaml_type=$rotyp:ty])? $rtyp:ty)?; $($t:tt)*
+	) => {
+		$(#[doc=$doc])*
+		$vis fn $name<'a>() $(-> $rtyp)? {
+			$crate::ocaml_interop::OCamlRuntime::init_persistent();
+			let val = $crate::ocaml_closure_reference!(@noarg closure, $name $(,$ocamlname)?);
+			let cr = unsafe { $crate::ocaml_interop::OCamlRuntime::recover_handle() };
+			let val = unsafe { $crate::ocaml_interop::OCaml::new(cr, val) };
+			$(val.to_rust::<$rtyp>())?
+		}
+
+		$crate::ocaml_defs!($($t)*);
+	};
 	(
 		$(#[ocaml_name=$ocamlname:expr])?
 		$(#[doc=$doc:expr])*
@@ -60,6 +95,7 @@ macro_rules! ocaml_defs {
 			)+
 			$crate::ocaml_closure_reference!(closure, $name $(,$ocamlname)?);
 			let cr = unsafe { $crate::ocaml_interop::OCamlRuntime::recover_handle() };
+			#[allow(unused)]
 			let ret: $crate::ocaml_interop::OCaml<'_, $crate::ocaml_defs!(@default_to {()} $($crate::ocaml_defs!(@default_to {$rtyp} $($rotyp)?))?)>
 				= $crate::ocaml_defs!(@emit_call closure cr $($arg)*);
 			$(ret.to_rust::<$rtyp>())?
@@ -68,6 +104,7 @@ macro_rules! ocaml_defs {
 		$crate::ocaml_defs!($($t)*);
 	};
 
+	// enum
 	(
 		$(#[ocaml_type=$otyp:ty])?
 		$(#[doc=$doc:expr])*
@@ -81,19 +118,13 @@ macro_rules! ocaml_defs {
 		$crate::ocaml_defs!(
 			@emit_enum
 			{{$($otyp)?} {$($doc)*} {$vis} $name} {} {}
-			$(
-				$(#[doc=$idoc])*
-				$item $(( $( $(#[ocaml_type=$iotyp])? $iname: $typ),+ ))?
-			),+
+			$({{$item $($idoc)*} $($({$iname, $typ $(,$iotyp)?})+)?})+
 		);
 		$crate::ocaml_defs!($($t)*);
 	};
 
-	(@emit_enum {
-		{$($otyp:ty)?} {$($doc:expr)*} {$vis:vis} $name:ident
-	} {$(
-		{{$($idoc:expr)*} $item:ident $({$($iname:ident, $typ:ty, $iotyp:ty,)+})?}
-	)*} {}) => {
+	(@emit_enum {{$($otyp:ty)?} {$($doc:expr)*} {$vis:vis} $name:ident}
+	 {$({{$item:ident $($idoc:expr)*} $({$($iname:ident, $typ:ty, $iotyp:ty,)+})?})*} {}) => {
 		$(#[doc = $doc])*
 		$vis enum $name {
 			$(
@@ -110,64 +141,34 @@ macro_rules! ocaml_defs {
 		}
 	};
 
-	(
-		@emit_enum {$($env:tt)*}
-		{$($parsed:tt)*} {}
-		$(#[doc=$idoc:expr])*
-		$item:ident $(( $(,)? ))?
-		$(,$($t:tt)*)?
-	) => {
+	(@emit_enum {$($env:tt)*} {$($parsed:tt)*} {} {$info:tt} $($t:tt)*) => {
+		$crate::ocaml_defs!(@emit_enum {$($env)*} {$($parsed)* {$info}} {} $($t)*);
+	};
+
+	(@emit_enum $env:tt {$($parsed:tt)*} $parsing:tt {$info:tt} $($t:tt)*) => {
+		$crate::ocaml_defs!(@emit_enum $env {$($parsed)* {$info $parsing}} {} $($t)*);
+	};
+	// with ocaml_type
+	(@emit_enum $env:tt $parsed:tt {$($parsing:tt)*}
+		{$info:tt {$iname:ident,$typ:ty,$iotyp:ty} $($other:tt)*} $($t:tt)*) => {
 		$crate::ocaml_defs!(
-			@emit_enum {$($env)*} {$($parsed)* {{$($idoc)*} $item }} {} $($($t)*)?
+			@emit_enum $env $parsed {$($parsing)* $iname, $typ, $iotyp,}
+			{$info $($other)*} $($t)*
 		);
 	};
 
-	(
-		@emit_enum {$($env:tt)*}
-		{$($parsed:tt)*} {$($parsing:tt)+}
-		$(#[doc=$idoc:expr])*
-		$item:ident $(( $(,)? ))?
-		$(,$($t:tt)*)?
-	) => {
+	// without ocaml_type
+	(@emit_enum {$($env:tt)*} {$($parsed:tt)*} {$($parsing:tt)*}
+		{$info:tt {$iname:ident,$typ:ty} $($other:tt)*} $($t:tt)*) => {
 		$crate::ocaml_defs!(
-			@emit_enum {$($env)*} {$($parsed)* {{$($idoc)*} $item {$($parsing)+}}} {} $($($t)*)?
+			@emit_enum {$($env)*} {$($parsed)*} {$($parsing)* $iname, $typ, $typ,}
+			{$info $($other)*} $($t)*
 		);
 	};
 
+	// struct
 	(
-		@emit_enum {$($env:tt)*} // with ocaml_type
-		{$($parsed:tt)*} {$($parsing:tt)*}
-		$(#[doc=$idoc:expr])*
-		$item:ident ( #[ocaml_type=$iotyp:ty] $iname:ident : $typ:ty $(,$($other:tt)*)? )
-		$($t:tt)*
-	) => {
-		$crate::ocaml_defs!(
-			@emit_enum {$($env)*}
-			{$($parsed)*} {$($parsing)* $iname, $typ, $iotyp,}
-			$(#[doc=$idoc])*
-			$item:ident ( $($($other:tt)*)? )
-			$($t:tt)*
-		);
-	};
-
-	(
-		@emit_enum {$($env:tt)*} // without ocaml_type
-		{$($parsed:tt)*} {$($parsing:tt)*}
-		$(#[doc=$idoc:expr])*
-		$item:ident ( $iname:ident : $typ:ty $(,$($other:tt)*)? )
-		$($t:tt)*
-	) => {
-		$crate::ocaml_defs!(
-			@emit_enum {$($env)*}
-			{$($parsed)*} {$($parsing)* $iname, $typ, $typ,}
-			$(#[doc=$idoc])*
-			$item ( $($($other)*)? )
-			$($t)*
-		);
-	};
-
-	(
-		$(#[ocaml_type=$otyp:ty])?
+		$(#[ocaml_type=$otyp:ident])?
 		$(#[doc=$doc:expr])*
 		$vis:vis struct $name:ident {
 			$(
@@ -177,18 +178,65 @@ macro_rules! ocaml_defs {
 			),+ $(,)?
 		} $($t:tt)*
 	) => {
+		$crate::ocaml_defs!(
+			@emit_struct {{$($otyp)?} {$($doc)*} {$vis} $name} {}
+			$({$ivis $item $($idoc)*} {$typ $(,$iotyp)?})+
+		);
+		$crate::ocaml_defs!($($t)*);
+	};
+
+	(@emit_struct {{$($otyp:ident)?} {$($doc:expr)*} {$vis:vis} $name:ident}
+	 {$({$ivis:vis $item:ident $($idoc:expr)*} {$typ:ty, $iotyp:ty})*}) => {
 		$(#[doc = $doc])*
 		$vis struct $name {
 			$(
 				$(#[doc = $idoc])*
-				$vis $item : $typ
+				$ivis $item : $typ
 			),+
 		}
 		$crate::ocaml_interop::impl_conv_ocaml_record! {
 			$name $(=> $otyp)? {
 				$(
-					$item : $crate::ocaml_defs!(@default_to {$typ} $($iotyp)?),
-				),+
+					$item : $iotyp,
+				)+
+			}
+		}
+	};
+
+	(@emit_struct $info:tt {$($parsing:tt)*} $iinfo:tt {$typ:ty} $($t:tt)*) => {
+		$crate::ocaml_defs!(@emit_struct $info {$($parsing)* $iinfo {$typ, $typ}} $($t)*);
+	};
+
+	(@emit_struct $info:tt {$($parsing:tt)*} $iinfo:tt $typs:tt $($t:tt)*) => {
+		$crate::ocaml_defs!(@emit_struct $info {$($parsing)* $iinfo $typs} $($t)*);
+	};
+
+	// type
+	(
+		$(#[derive($($derive:ident),*)])?
+		$(#[doc=$doc:expr])*
+		$vis:vis type $name:ident; $($t:tt)*
+	) => {
+		$(#[derive($($derive),*)])?
+		$(#[doc = $doc])*
+		$vis struct $name($crate::ocaml_interop::RawOCaml);
+		unsafe impl $crate::ocaml_interop::ToOCaml<$name> for $name {
+			fn to_ocaml<'a>(&self, cr: &'a mut $crate::ocaml_interop::OCamlRuntime)
+				-> $crate::ocaml_interop::OCaml<'a, $name> {
+				unsafe {
+					$crate::ocaml_interop::OCaml::new(
+						cr,
+						self.0
+					)
+				}
+			}
+		}
+		unsafe impl $crate::ocaml_interop::FromOCaml<$name> for $name {
+			fn from_ocaml<'a>(v: $crate::ocaml_interop::OCaml<$name>)
+				-> $name {
+				unsafe {
+					Self(v.raw())
+				}
 			}
 		}
 		$crate::ocaml_defs!($($t)*);
@@ -201,6 +249,7 @@ macro_rules! ocaml_defs {
 // }
 
 pub mod entry {
+	use ocaml_interop::OCamlInt;
 
 	ocaml_defs! {
 		#[ocaml_name = "Main.show_error_category"]
@@ -209,9 +258,9 @@ pub mod entry {
 
 		#[ocaml_type = Line]
 		pub enum Line {
-			NormalLine(s: String),
+			NormalLine(#[ocaml_type = String] s: String),
 			DisplayLine(s: String),
-			NormalLineOption(o: Option<String>),
+			NormalLineOption(o: Option<String>, s: String),
 			DisplayLineOption(o: Option<String>),
 		}
 
@@ -223,6 +272,102 @@ pub mod entry {
 			Interface,
 			System,
 		}
+
+		pub struct MyStruct {
+			a: String,
+			#[ocaml_type = OCamlInt]
+			b: i64
+		}
+
+		type Apple;
+	}
+}
+
+pub mod range {
+	use ocaml_interop::OCamlInt;
+	ocaml_defs! {
+		pub enum Range {
+			Dummy(s: String),
+			Normal(
+				s: String,
+				#[ocaml_type = OCamlInt] i: i64,
+				#[ocaml_type = OCamlInt] j: i64,
+				#[ocaml_type = OCamlInt] k: i64,
+				#[ocaml_type = OCamlInt] l: i64,
+			),
+		}
+
+		#[ocaml_name = "Range.dummy"]
+		pub fn dummy(s: String) -> Range;
+		#[ocaml_name = "Range.is_dummy"]
+		pub fn is_dummy(r: Range) -> bool;
+		#[ocaml_name = "Range.message"]
+		pub fn message(r: Range) -> String;
+		#[ocaml_name = "Range.to_string"]
+		pub fn to_string(r: Range) -> String;
+		#[ocaml_name = "Range.get_last"]
+		pub fn get_last(r: Range) ->
+			#[ocaml_type = Option<(String, OCamlInt, OCamlInt)>]
+			Option<(String, i64, i64)>;
+		#[ocaml_name = "Range.unite"]
+		pub fn unite(r1: Range, r2: Range) -> Range;
+		#[ocaml_name = "Range.make"]
+		pub fn make(
+			s: String,
+			#[ocaml_type = OCamlInt] i: i64,
+			#[ocaml_type = OCamlInt] j: i64,
+			#[ocaml_type = OCamlInt] k: i64
+		) -> Range;
+		#[ocaml_name = "Range.make_large"]
+		pub fn make_large(
+			s: String,
+			#[ocaml_type = OCamlInt] i: i64,
+			#[ocaml_type = OCamlInt] j: i64,
+			#[ocaml_type = OCamlInt] k: i64,
+			#[ocaml_type = OCamlInt] l: i64
+		) -> Range;
+	}
+
+	#[test]
+	fn test() {
+		eprintln!("hello");
+	}
+}
+
+pub mod store_id {
+	use ocaml_interop::OCamlInt;
+	ocaml_defs! {
+		#[derive(Copy, Clone)]
+		pub type StoreID;
+
+		#[ocaml_name = "StoreID.initialize"]
+		pub fn initialize(v: ());
+
+		#[ocaml_name = "StoreID.equal"]
+		pub fn equal(v1: StoreID, v2: StoreID) -> bool;
+
+		#[ocaml_name = "StoreID.compare"]
+		pub fn compare(v1: StoreID, v2: StoreID) -> #[ocaml_type = OCamlInt] i64;
+
+		#[ocaml_name = "StoreID.hash"]
+		pub fn hash(v: StoreID) -> #[ocaml_type = OCamlInt] i64;
+
+		#[ocaml_name = "StoreID.fresh"]
+		pub fn fresh(v: ()) -> StoreID;
+
+		#[ocaml_name = "StoreID.show_direct"]
+		pub fn show_direct(v: StoreID) -> String;
+	}
+
+	#[test]
+	fn test() {
+		initialize(());
+		let id0 = fresh(());
+		let id1 = fresh(());
+		assert!(equal(id1, id1));
+		assert!(compare(id0, id1) < 0);
+		assert_eq!(&show_direct(id0), "<SID:0>");
+		let _ = hash(id0);
 	}
 }
 

@@ -1,8 +1,80 @@
 extern crate pkg_config;
 
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::{env, process::Command};
+use std::{ffi, fs, io};
+
+fn generate_glue(srcdir: &Path, output: &Path) -> Result<(), std::io::Error> {
+	let ignore_mod = [
+		"DirectedGraph.",
+		"Display.",
+		"HashTree.",
+		"StoreID.set",
+		"StoreID.reset",
+		"StoreID.reset",
+		"Typeenv.fresh_type_id",
+		"Typeenv.add_constructor",
+		"Typeenv.register_type",
+		"Main.main",
+		"MyUtil.( >>= )",
+		// "MyUtil.( += )",
+		// "MyUtil.( @|> )",
+		"MyUtil.return",
+		"MyUtil.err",
+		"MyUtil.continue",
+		"MyUtil.escape",
+		"MyUtil.force",
+	];
+	fn find_files(dir: &Path) -> Result<Vec<PathBuf>, io::Error> {
+		let mut ret = Vec::new();
+		for entry in fs::read_dir(dir)? {
+			let entry = entry?;
+			let path = entry.path();
+			if entry.file_type()?.is_dir() {
+				ret.extend(find_files(&path)?);
+			} else if path.extension() == Some(ffi::OsStr::new("mli")) {
+				ret.push(path);
+			}
+		}
+		Ok(ret)
+	}
+	let mut glue = vec![];
+	for fname in find_files(srcdir)? {
+		let mut modname = fname.file_stem().unwrap().to_str().unwrap().chars();
+		// e.g.  src/testItem.mli -> TestItem
+		let modname: String = modname
+			.next()
+			.unwrap()
+			.to_uppercase()
+			.chain(modname)
+			.collect();
+		let f = fs::File::open(fname)?;
+		for line in io::BufReader::new(f).lines() {
+			if let Some(s) = line?.trim().strip_prefix("val") {
+				if let Some(i) = s.find(':') {
+					let func = s.get(0..i).unwrap().trim();
+					let fullname = format!("{}.{}", &modname, func);
+					if !ignore_mod.iter().any(|m| fullname.starts_with(m)) {
+						glue.push(format!("    Callback.register \"{0}\" {0} ", &fullname));
+					}
+				}
+			}
+		}
+	}
+	{
+		let mut output = fs::File::create(output)?;
+		writeln!(
+			output,
+			"let main_lib () =\n{}",
+			glue.iter()
+				.map(|s| s.as_ref())
+				.collect::<Vec<_>>()
+				.join(" ;\n")
+		)?;
+	}
+	Ok(())
+}
 
 fn test(cmdname: &str, chdir: Option<&str>, args: &[&str]) -> Result<bool, String> {
 	eprintln!("[build.rs] Running {} {:?}", cmdname, args);
@@ -234,70 +306,102 @@ fn run() -> Result<(), String> {
 			&join(&[out_dir, "libsatysfi.so"]),
 			// _build error shoule be cleaned every time to prevent error
 			&join(&[out_dir, "_build"]),
-			&join(&[out_dir, "dune.backup"]),
+			&join(&[out_dir, "dune"]),
+			&join(&[out_dir, "satysfi.ml"]),
+			&join(&[out_dir, "main.ml"]),
+			&join(&[out_dir, "main.mli"]),
+			&join(&[out_dir, "lib.ml"]),
 		],
 	)?;
 	fetch_missing_libs(&join(&[out_dir, "lib"]))?;
+	generate_glue(
+		&[satysfi_dir, "src"].iter().cloned().collect::<PathBuf>(),
+		&[out_dir, "lib.ml"].iter().cloned().collect::<PathBuf>(),
+	)
+	.map_err(|e| format!("{}", e))?;
 	runcmd(
 		"mv",
 		None,
 		&[
 			&join(&[satysfi_dir, "bin", "dune"]),
-			&join(&[out_dir, "dune.backup"]),
+			&join(&[satysfi_dir, "bin", "satysfi.ml"]),
+			&join(&[out_dir]),
 		],
 	)?;
-	let _defer = Defer(|| {
-		eprintln!("[build.rs] Running defer...");
-		let _ = runcmd("rm", None, &[&join(&[satysfi_dir, "bin", "dune"])]);
-		let _ = runcmd(
-			"mv",
-			None,
-			&[
-				&join(&[out_dir, "dune.backup"]),
-				&join(&[satysfi_dir, "bin", "dune"]),
-			],
-		);
-	});
-	eprintln!(
-		"[build.rs] Copying {} to {}",
-		&join(&[project_dir, "dune-satysfi"]),
-		&join(&[satysfi_dir, "bin", "dune"]),
-	);
 	runcmd(
 		"cp",
 		None,
 		&[
-			&join(&[project_dir, "dune-satysfi"]),
-			&join(&[satysfi_dir, "bin", "dune"]),
+			&join(&[satysfi_dir, "src", "frontend", "main.ml"]),
+			&join(&[satysfi_dir, "src", "frontend", "main.mli"]),
+			&join(&[out_dir]),
 		],
 	)?;
-	// if test(
-	// 	"grep",
-	// 	None,
-	// 	&["-e", "\\<modes\\>", &join(&[satysfi_dir, "bin", "dune"])],
-	// )? {
-	// 	runcmd(
-	// 		"sed",
-	// 		None,
-	// 		&[
-	// 			"-i",
-	// 			&join(&[satysfi_dir, "bin", "dune"]),
-	// 			"-e",
-	// 			"s/^.*\\<modes\\>.*$/ (modes (native exe) (native shared_object))/",
-	// 		],
-	// 	)?;
-	// } else {
-	// 	runcmd(
-	// 		"sed",
-	// 		None,
-	// 		&[
-	// 			"-i",
-	// 			&join(&[satysfi_dir, "bin", "dune"]),
-	// 			"-e",
-	// 			"2i (modes (native exe) (native shared_object))",
-	// 		],
-	// 	)?;
-	// }
+	let _defer = Defer(|| {
+		eprintln!("[build.rs] Running defer...");
+		let _ = runcmd(
+			"rm",
+			None,
+			&[
+				"-f",
+				&join(&[satysfi_dir, "bin", "satysfi.ml"]),
+				&join(&[satysfi_dir, "src", "frontend", "main.mli"]),
+				&join(&[satysfi_dir, "src", "frontend", "main.ml"]),
+				&join(&[satysfi_dir, "bin", "dune"]),
+			],
+		);
+		let _ = runcmd(
+			"mv",
+			None,
+			&[
+				&join(&[out_dir, "dune"]),
+				&join(&[out_dir, "satysfi.ml"]),
+				&join(&[satysfi_dir, "bin"]),
+			],
+		);
+		let _ = runcmd(
+			"mv",
+			None,
+			&[
+				&join(&[out_dir, "main.ml"]),
+				&join(&[out_dir, "main.mli"]),
+				&join(&[satysfi_dir, "src", "frontend"]),
+			],
+		);
+	});
+	runcmd(
+		"cp",
+		None,
+		&[
+			&join(&[project_dir, "patch", "dune"]),
+			&join(&[project_dir, "patch", "satysfi.ml"]),
+			&join(&[satysfi_dir, "bin"]),
+		],
+	)?;
+	runcmd(
+		"sh",
+		None,
+		&[
+			"-c",
+			&format!(
+				"cat \"{}\" >> \"{}\"",
+				join(&[out_dir, "lib.ml"]),
+				join(&[satysfi_dir, "src", "frontend", "main.ml"])
+			),
+		],
+	)?;
+	runcmd(
+		"sh",
+		None,
+		&[
+			"-c",
+			&format!(
+				"cat \"{}\" >> \"{}\"",
+				join(&[project_dir, "patch", "lib.mli"]),
+				join(&[satysfi_dir, "src", "frontend", "main.mli"])
+			),
+		],
+	)?;
 	test(
 		"opam",
 		None,
@@ -383,10 +487,7 @@ fn run() -> Result<(), String> {
 	generate_version_rs(&join(&[out_dir, "version.rs"]), satysfi_dir)?;
 
 	println!("cargo:rerun-if-changed=build.rs");
-	println!(
-		"cargo:rerun-if-changed={}",
-		join(&[project_dir, "dune-satysfi"])
-	);
+	println!("cargo:rerun-if-changed={}", join(&[project_dir, "patch"]));
 	// println!("cargo:rerun-if-changed={}", satysfi_dir);
 	println!("cargo:rustc-link-search={}", out_dir);
 	println!("cargo:rustc-link-lib=satysfi");
